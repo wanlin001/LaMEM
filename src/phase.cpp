@@ -318,6 +318,10 @@ PetscErrorCode DBMatReadPhase(DBMat *dbm, FB *fb, PetscBool PrintOutput)
 		// implies we are loading a phase diagram file from disk
 		m->pdAct = 1;
 		
+		// 2026-10-13 pdrestart: clear the file name first; on restart m is read back from the
+		// restart file and strcat below would append the name a second time
+		m->pdf[0] = '\0';
+
 		// Get the directory of the phase diagram if specified
 		PetscCall(getStringParam(fb, _OPTIONAL_, "rho_ph_file", PhaseDiagram_Dir, "none"));
 		if(strcmp(PhaseDiagram_Dir, "none"))
