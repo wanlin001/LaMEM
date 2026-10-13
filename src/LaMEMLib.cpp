@@ -290,6 +290,13 @@ PetscErrorCode LaMEMLibLoadRestart(LaMEMLib *lm, FB *fb)
 	// override material database
 	PetscCall(DBMatCreate(&lm->dbm, fb, PETSC_TRUE));
 
+	// 2026-10-13 pdrestart: phase diagrams are only loaded in ADVMarkInit (fresh start);
+	// after restart jr->Pd is allocated but empty -> reload tables for phases that use rho_ph
+	for(PetscInt i = 0; i < lm->dbm.numPhases; i++)
+	{
+		if(lm->dbm.phases[i].pdAct) { PetscCall(LoadPhaseDiagram(&lm->actx, lm->dbm.phases, i)); }
+	}
+
 	// close temporary restart file
 	fclose(fp);
 
