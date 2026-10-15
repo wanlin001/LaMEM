@@ -431,6 +431,9 @@ PetscErrorCode BCCreate(BCCtx *bc, FB *fb)
 	bc->fixPhase                = -1;
 	bc->num_phase_bc            =   -1;
 	bc->velout                  =  DBL_MAX;
+	bc->lat_min                 = -DBL_MAX;
+	bc->lat_max                 =  DBL_MAX;
+	bc->lat_taper               =  0.0;
 	bc->Plume_Inflow            = 0;
 	bc->bvel_temperature_inflow = -1;
 
@@ -548,6 +551,9 @@ PetscErrorCode BCCreate(BCCtx *bc, FB *fb)
 		PetscCall(getIntParam   (fb, _OPTIONAL_, "velin_num_periods",     &bc->VelNumPeriods,    1, _max_periods_));
 		PetscCall(getIntParam   (fb, _OPTIONAL_, "velin_net_num_periods", &bc->VelNetNumPeriods, 1, _max_periods_));
 		PetscCall(getScalarParam(fb, _OPTIONAL_, "bvel_relax_d",          &bc->relax_dist,       1, scal->length ));
+		PetscCall(getScalarParam(fb, _OPTIONAL_, "bvel_lat_min",          &bc->lat_min,          1, scal->length ));
+		PetscCall(getScalarParam(fb, _OPTIONAL_, "bvel_lat_max",          &bc->lat_max,          1, scal->length ));
+		PetscCall(getScalarParam(fb, _OPTIONAL_, "bvel_lat_taper",        &bc->lat_taper,        1, scal->length ));
 
 		if(bc->VelNumPeriods > 1)
 		{
@@ -905,6 +911,11 @@ PetscErrorCode BCCreate(BCCtx *bc, FB *fb)
 		}
 
 		PetscPrintf(PETSC_COMM_WORLD, "      Inflow velocity boundary                : %s \n", str_inflow);
+		if(bc->lat_min > -DBL_MAX || bc->lat_max < DBL_MAX)
+		{
+			PetscPrintf(PETSC_COMM_WORLD, "      Lateral extent of inflow                : [%g, %g] %s, taper %g %s \n",
+				bc->lat_min*scal->length, bc->lat_max*scal->length, scal->lbl_length, bc->lat_taper*scal->length, scal->lbl_length);
+		}
 
 		if(bc->face_out == 1)
 		{
@@ -1891,6 +1902,24 @@ PetscErrorCode BCApplyBezier(BCCtx *bc)
 PetscFunctionReturn(0);
 }
 //---------------------------------------------------------------------------
+// lateral weight of the inflow condition: 0 outside [lat_min, lat_max],
+// linear ramp 0 -> 1 over lat_taper inside the range, 1 elsewhere.
+// t = y for Left/Right faces, t = x for Front/Back faces.
+// Scales the whole column (inflow and compensating outflow) -> each column stays mass balanced.
+static PetscScalar BCInflowLateralWeight(BCCtx *bc, PetscScalar t)
+{
+	PetscScalar w;
+
+	if(t < bc->lat_min || t > bc->lat_max) return 0.0;
+	if(bc->lat_taper <= 0.0)               return 1.0;
+
+	w = 1.0;
+	if(bc->lat_min > -DBL_MAX) w = PetscMin(w, (t - bc->lat_min)/bc->lat_taper);
+	if(bc->lat_max <  DBL_MAX) w = PetscMin(w, (bc->lat_max - t)/bc->lat_taper);
+
+	return w;
+}
+//---------------------------------------------------------------------------
 PetscErrorCode BCApplyBoundVel(BCCtx *bc)
 {
 	FDSTAG      *fs;
@@ -1964,6 +1993,8 @@ PetscErrorCode BCApplyBoundVel(BCCtx *bc)
 					if(z < bot-relax_dist)             vel = velout;
 				}
 
+				vel *= BCInflowLateralWeight(bc, COORD_CELL(j, sy, fs->dsy));
+
 				if((bc->face  == 1) && i == 0)                         { bcvx[k][j][i] =  vel; }
 				if((bc->face  == 1) && i == mnx && bc->face_out == 1)  { bcvx[k][j][i] =  vel; }
 
@@ -1982,6 +2013,7 @@ PetscErrorCode BCApplyBoundVel(BCCtx *bc)
 				if(z <= top && z >= bot) vel = velin;
 				if(z < bot)              vel = velout;
 
+				vel *= BCInflowLateralWeight(bc, COORD_CELL(j, sy, fs->dsy));
 				if((bc->face == 1)  && i == 0 )   { bcvx[k][j][i] = vel; }
 				if((bc->face == 2) && i == mnx) { bcvx[k][j][i] = vel; }
 			}
@@ -2028,6 +2060,8 @@ PetscErrorCode BCApplyBoundVel(BCCtx *bc)
 					if(z < bot-relax_dist)         vel = velout;
 				}
 
+				vel *= BCInflowLateralWeight(bc, COORD_CELL(i, sx, fs->dsx));
+
 				if((bc->face  == 3) && j == 0)                         { bcvy[k][j][i] =  vel; }
 				if((bc->face  == 3) && j == mny && bc->face_out == 1)  { bcvy[k][j][i] =  vel; }
 
@@ -2046,6 +2080,7 @@ PetscErrorCode BCApplyBoundVel(BCCtx *bc)
 				if(z <= top && z >= bot) vel = velin;
 				if(z < bot)              vel = velout;
 
+				vel *= BCInflowLateralWeight(bc, COORD_CELL(i, sx, fs->dsx));
 				if(bc->face == 3 && j == 0)   { bcvy[k][j][i] = vel; }
 				if(bc->face == 4 && j == mny) { bcvy[k][j][i] = vel; }
 			}
@@ -2798,7 +2833,8 @@ PetscErrorCode BCOverridePhase(BCCtx *bc, PetscInt cellID, Marker *P)
 				||  (bc->face == 2 && i + sx == mx)
 				||  (bc->face == 3 && j + sy == 0)
 				||  (bc->face == 4 && j + sy == my))
-				&&  (z >= bc->bot && z <= bc->top) && (bc->bvel_temperature_inflow>0))
+				&&  (z >= bc->bot && z <= bc->top) && (bc->bvel_temperature_inflow>0)
+				&&  (BCInflowLateralWeight(bc, (bc->face <= 2) ? y : x) > 0.0))
 		{
 			if(bc->jr->ctrl.Adiabatic_gr > 0.0)
 			{
@@ -2838,7 +2874,8 @@ PetscErrorCode BCOverridePhase(BCCtx *bc, PetscInt cellID, Marker *P)
 					||  (bc->face == 2 && i + sx == mx)
 					||  (bc->face == 3 && j + sy == 0)
 					||  (bc->face == 4 && j + sy == my))
-					&&  (z >= bc->bot-bc->relax_dist && z <= bc->top+bc->relax_dist))
+					&&  (z >= bc->bot-bc->relax_dist && z <= bc->top+bc->relax_dist)
+					&&  (BCInflowLateralWeight(bc, (bc->face <= 2) ? y : x) > 0.0))
 			{
 				for(ip=0;ip<bc->num_phase_bc;ip++)
 				{
